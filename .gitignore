@@ -1,0 +1,20 @@
+# custom 
+logs/
+ckpt/
+preds/
+scripts/*.json
+
+# swp files 
+*.sw[oap]
+
+# python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+
+# environments
+.env
+.vent
+
+# jupyter
+.ipynb_checkpoints

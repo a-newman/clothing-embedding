@@ -39,17 +39,44 @@ TEST_TRANSFORMS = T.Compose([
 ])
 
 
+def get_dataset(dataset_name, dset_mode, *args, **kwargs):
+    if dataset_name == "deepfashion":
+        train_ds = DeepFashionContrastiveLoader(split="train",
+                                                transform=TRAIN_TRANSFORMS,
+                                                mode=dset_mode,
+                                                *args,
+                                                **kwargs)
+        test_ds = DeepFashionContrastiveLoader(split="validation",
+                                               transform=TEST_TRANSFORMS,
+                                               mode=dset_mode,
+                                               *args,
+                                               **kwargs)
+    elif dataset_name == "simplicity":
+        train_ds = SimplicityContrastiveLoader(
+            image_transforms=TRAIN_TRANSFORMS,
+            line_drawing_tranforms=TRAIN_TRANSFORMS,
+            mode=dset_mode,
+            *args,
+            **kwargs)
+        test_ds = SimplicityContrastiveLoader(
+            image_transforms=TEST_TRANSFORMS,
+            line_drawing_tranforms=TEST_TRANSFORMS,
+            mode=dset_mode,
+            *args,
+            **kwargs)
+    else:
+        raise RuntimeError("Unrecognized dataset name {}".format(dataset_name))
+
+    return train_ds, test_ds
+
+
+class InvalidDataException(Exception):
+    pass
+
+
 class DeepFashionContrastiveLoader(data.Dataset):
     """
     Loader for the deepfashion dataset.
-
-    # how to do this?
-    # steps:
-     1. sample an appropriate pair,
-        - should I / can I enumerate all pairs ahead of time?
-        -
-     2. load the data
-     3. transform it as required
     """
     def __init__(self,
                  split,
@@ -67,7 +94,6 @@ class DeepFashionContrastiveLoader(data.Dataset):
                                     one channel of 255/0 mask
                 - 'color_mask_crop': 3 channels of color, masked out w/ 0
                    values and then cropped to within a margin of the item
-                - 'color': whole image, no mask
         """
         super(DeepFashionContrastiveLoader, self).__init__()
         self.mode = mode
@@ -239,19 +265,27 @@ class DeepFashionContrastiveLoader(data.Dataset):
 
 
 class SimplicityContrastiveLoader(data.Dataset):
+    """Data loader for the Simplicity data set."""
     def __init__(self,
                  image_path=SIMPLICITY_IMAGES_PATH,
                  data_path=SIMPLICITY_DATA_PATH,
                  bbox_path=SIMPLICITY_BBOXES_PATH,
                  positive_proportion=0.5,
                  image_transforms=None,
-                 line_drawing_tranforms=None):
+                 line_drawing_tranforms=None,
+                 one_sample_only=False,
+                 mode="natural_image"):
         self.image_path = image_path
         self.data_path = data_path
         self.bbox_path = bbox_path
         self.positive_proportion = positive_proportion
         self.image_transforms = image_transforms
         self.line_drawing_transforms = line_drawing_tranforms
+        self.one_sample_only = one_sample_only
+        self.mode = mode
+        print("Mode", self.mode)
+
+        assert self.mode == "natural_image" or self.mode == "line_drawing"
 
         # figure out the data you will pull from
         self.data_files = os.listdir(self.data_path)
@@ -266,16 +300,22 @@ class SimplicityContrastiveLoader(data.Dataset):
 
         return img
 
-    def _load_data_file(self, index):
-        data_file = self.data_files[index]
+    def _load_data_file(self, index=None, data_file=None):
+        assert index is not None or data_file is not None
+
+        if data_file is None:
+            data_file = self.data_files[index]
 
         with open(os.path.join(self.data_path, data_file)) as infile:
             data = json.load(infile)
 
         return data
 
-    def _load_line_drawing_bboxes(self, index):
-        data_file = self.data_files[index]
+    def _load_line_drawing_bboxes(self, index=None, data_file=None):
+        assert index is not None or data_file is not None
+
+        if data_file is None:
+            data_file = self.data_files[index]
         fpath = os.path.join(self.bbox_path, data_file)
 
         with open(fpath) as infile:
@@ -283,13 +323,11 @@ class SimplicityContrastiveLoader(data.Dataset):
 
         return data
 
-    def _load_line_drawing(self, index):
-        data = self._load_data_file(index)
+    def _load_line_drawing(self, index=None, data_file=None):
+        data = self._load_data_file(index, data_file)
         line_drawing_path = os.path.join(self.image_path,
                                          data["line_image"][0])
         img = cv2.imread(line_drawing_path)
-        # gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # binary = None
 
         return img
 
@@ -303,12 +341,46 @@ class SimplicityContrastiveLoader(data.Dataset):
 
         return image[y1:y2, x1:x2, :]
 
+    def get_itemids(self):
+        return self.data_files
+
+    def getitem_by_id(self, data_file):
+        if self.mode == "natural_image":
+            with open(os.path.join(self.data_path, data_file)) as infile:
+                data = json.load(infile)
+
+            imfile = data['other_images'][0][0]
+            img = self._load_image(imfile)
+
+            return img
+        else:
+            return self._get_principal_line_drawing(data_file=data_file)
+
+    def _get_principal_line_drawing(self, index=None, data_file=None):
+        assert index is not None or data_file is not None
+        bboxes = self._load_line_drawing_bboxes(index, data_file)
+        bbox = bboxes[0]
+        line_drawing = self._load_line_drawing(index, data_file)
+        cropped_line_drawing = self._crop(line_drawing, bbox)
+
+        return cropped_line_drawing
+
     def __getitem__(self, index):
         data = self._load_data_file(index)
 
         # choose a random image
         imfile = random.choice(data['other_images'])[0]
         img = self._load_image(imfile)
+
+        if self.image_transforms is not None:
+            img = self.image_transforms(img)
+
+        if self.one_sample_only:
+            if self.mode == "natural_image":
+                return img
+            else:
+                return self.line_drawing_transforms(
+                    self._get_principal_line_drawing(index=index))
 
         # choose a line drawing
         choose_same_class = random.random() < self.positive_proportion
@@ -323,12 +395,15 @@ class SimplicityContrastiveLoader(data.Dataset):
                     break
 
         bboxes = self._load_line_drawing_bboxes(bbox_index)
-        bbox = random.choice(bboxes)
+        try:
+            bbox = random.choice(bboxes)
+        except IndexError:
+            print("WARNING: no bounding boxes found for item {} ({})".format(
+                bbox_index, self.data_files[bbox_index]))
+            h, w = img.shape
+            bbox = [0, 0, h, w]
         line_drawing = self._load_line_drawing(bbox_index)
         cropped_line_drawing = self._crop(line_drawing, bbox)
-
-        if self.image_transforms is not None:
-            img = self.image_transforms(img)
 
         if self.line_drawing_transforms is not None:
             cropped_line_drawing = self.line_drawing_transforms(

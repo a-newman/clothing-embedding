@@ -11,9 +11,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 import config as cfg
-from data_loader import (TEST_TRANSFORMS, TRAIN_TRANSFORMS,
-                         DeepFashionContrastiveLoader)
-from model import SiameseEncodingModel
+from data_loader import get_dataset
+from model import get_model
 
 
 class ContrastiveLoss(nn.Module):
@@ -53,21 +52,6 @@ class ContrastiveLoss(nn.Module):
 
         return loss
 
-        # # this gives a tensor of size b x enc_len
-        # dist_squared = torch.pow(x1 - x2, 2).sum(dim=1)
-        # # tensor of size b x 1
-        # dist = torch.sqrt(dist_squared)
-        # l_p = 0.5 * (1 - y) * dist_squared
-
-        # print('dist', dist)
-        # margin_dist = torch.clamp(self.margin - dist, min=0.0)
-        # margin_dist_squared = margin_dist.pow(2)
-        # l_n = 0.5 * y * margin_dist_squared
-
-        # loss = torch.sum(l_p + l_n)
-
-        return loss
-
 
 def image_rescale_zero_to_1_transform():
     def _inner(sample):
@@ -84,29 +68,45 @@ def image_rescale_zero_to_1_transform():
     return _inner
 
 
-def save_ckpt(savepath, model, epoch, it, optimizer, dset_mode):
+def save_ckpt(savepath, model, epoch, it, optimizer, dset_mode, dataset_name,
+              model_type):
     torch.save(
         {
             'epoch': epoch,
             'it': it,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'dset_mode': dset_mode
+            'dset_mode': dset_mode,
+            'dataset_name': dataset_name,
+            'model_type': model_type
         }, savepath)
 
 
 def main(verbose=1,
          print_freq=100,
          restore=True,
+         ckpt_path=None,
          val_freq=1,
          run_id="model",
          dset_mode="grayscale_mask",
+         model_type="siamese",
+         dataset_name="deepfashion",
+         ckpt_type="siamese",
          freeze_encoder_until_it=1000):
+
+    print("TRAINING MODEL {} ON DATASET {}".format(model_type, dataset_name))
+
+    if restore and ckpt_path:
+        raise RuntimeError("Specify restore 0R ckpt_path")
 
     ckpt_savepath = os.path.join(cfg.CKPT_DIR, "{}.pth".format(run_id))
     print("Saving ckpts to {}".format(ckpt_savepath))
     logs_savepath = os.path.join(cfg.LOGDIR, run_id)
     print("Saving logs to {}".format(logs_savepath))
+
+    if restore or ckpt_path:
+        print("Restoring weights from {}".format(
+            ckpt_savepath if restore else ckpt_path))
 
     if cfg.USE_GPU:
         if not torch.cuda.is_available():
@@ -118,7 +118,7 @@ def main(verbose=1,
     print('DEVICE', device)
 
     # model
-    model = SiameseEncodingModel(freeze_encoder=True)
+    model = get_model(model_type)
     model = DataParallel(model)
 
     # must call this before constructing the optimizer:
@@ -140,7 +140,18 @@ def main(verbose=1,
     iteration = 0
     unfrozen = False
 
-    if restore:
+    if ckpt_path:
+        ckpt = torch.load(ckpt_path)
+        state_dict = ckpt['model_state_dict']
+
+        if ckpt_type == model_type:
+            model.load_state_dict(state_dict)
+        elif model_type == 'dual' and ckpt_type == 'siamese':
+            model = load_siamese_ckpt_into_dual(model, state_dict)
+        else:
+            raise NotImplementedError()
+
+    elif restore:
         if os.path.exists(ckpt_savepath):
             print("LOADING MODEL")
             ckpt = torch.load(ckpt_savepath)
@@ -150,15 +161,13 @@ def main(verbose=1,
             iteration = ckpt['it']
             dset_mode = ckpt.get('dset_mode', dset_mode)
 
+    else:
+        raise RuntimeError("Should not get here! Check for bugs")
+
     print("Using dset_mode {}".format(dset_mode))
 
     # dataset
-    train_ds = DeepFashionContrastiveLoader(split="train",
-                                            transform=TRAIN_TRANSFORMS,
-                                            mode=dset_mode)
-    test_ds = DeepFashionContrastiveLoader(split="validation",
-                                           transform=TEST_TRANSFORMS,
-                                           mode=dset_mode)
+    train_ds, test_ds = get_dataset(dataset_name, dset_mode)
     # train_ds = Subset(train_ds, range(500))
     # test_ds = Subset(test_ds, range(100))
     train_dl = DataLoader(train_ds,
@@ -218,9 +227,8 @@ def main(verbose=1,
 
             # do some validation
 
-            print("Validating...")
-
             if (epoch + 1) % val_freq == 0:
+                print("Validating...")
                 model.eval()  # puts model in validation mode
 
                 with torch.no_grad():
@@ -241,11 +249,12 @@ def main(verbose=1,
             lr_scheduler.step()
 
             save_ckpt(ckpt_savepath, model, epoch, iteration, optimizer,
-                      dset_mode)
+                      dset_mode, dataset_name, model_type)
 
     except KeyboardInterrupt:
         print('Got keyboard interrupt, saving model...')
-        save_ckpt(ckpt_savepath, model, epoch, iteration, optimizer, dset_mode)
+        save_ckpt(ckpt_savepath, model, epoch, iteration, optimizer, dset_mode,
+                  dataset_name, model_type)
 
 
 if __name__ == "__main__":

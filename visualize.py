@@ -5,13 +5,21 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 import config as cfg
-from data_loader import DeepFashionContrastiveLoader
+from data_loader import get_dataset
 
 
-def plot_nearest_neighbors(run_id, dset_split, subset_n=100):
+def plot_nearest_neighbors(run_id,
+                           dataset_name,
+                           analysis_tag="",
+                           dset_split="validation",
+                           dset_mode='color_mask_crop',
+                           subset_n=100):
+    analysis_id = run_id if not analysis_tag else "{}_{}".format(
+        run_id, analysis_tag)
     nn_savepath = os.path.join(
         cfg.PREDS_DIR,
-        "{}_{}_{}_nearest_neighbors.json".format(run_id, dset_split, subset_n))
+        "{}_{}_{}_nearest_neighbors.json".format(analysis_id, dset_split,
+                                                 subset_n))
     print("Loading nearest neighbor data from: {}".format(nn_savepath))
 
     with open(nn_savepath) as infile:
@@ -20,10 +28,8 @@ def plot_nearest_neighbors(run_id, dset_split, subset_n=100):
     ks = list(nn_data.keys())[:20]
     nn_data = {k: nn_data[k] for k in ks}
 
-    ds = DeepFashionContrastiveLoader(split=dset_split,
-                                      transform=None,
-                                      mode='color_mask_crop',
-                                      one_sample_only=True)
+    ds = get_dataset(dataset_name, dset_mode=dset_mode, one_sample_only=True)
+    ds = ds[0] if dset_split == "train" else ds[1]
 
     def _load_image(imageid):
         return ds.getitem_by_id(imageid)

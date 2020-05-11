@@ -11,23 +11,28 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 import config as cfg
-from data_loader import TEST_TRANSFORMS, DeepFashionContrastiveLoader
-from model import SiameseEncodingModel
+from data_loader import get_dataset
+from model import get_model
 
 
 def generate_embedding_vectors(run_id,
+                               analysis_tag="",
                                num_workers=20,
                                use_gpu=True,
-                               dset_mode="grayscale_mask",
+                               dset_mode=None,
                                dset_split="validation",
+                               dataset_name="deepfashion",
+                               principal_encoder='1',
                                *useless_args,
                                **useless_kwargs):
 
     ckpt_path = os.path.join(cfg.CKPT_DIR, "{}.pth".format(run_id))
     print("ckpt path: {}".format(ckpt_path))
 
+    analysis_id = run_id if not analysis_tag else "{}_{}".format(
+        run_id, analysis_tag)
     preds_path = os.path.join(
-        cfg.PREDS_DIR, "{}_{}_embedding.json".format(run_id, dset_split))
+        cfg.PREDS_DIR, "{}_{}_embedding.json".format(analysis_id, dset_split))
     print("preds savepath: {}".format(preds_path))
 
     if use_gpu:
@@ -39,28 +44,29 @@ def generate_embedding_vectors(run_id,
 
     print('DEVICE', device)
 
-    # model
-    model = SiameseEncodingModel(freeze_encoder=True, train_mode=False)
-    enc_dim = model.enc_dim
-    model = nn.DataParallel(model)
-
-    # must call this before constructing the optimizer:
-    # https://pytorch.org/docs/stable/optim.html
-    model.to(device)
-
     # load the ckpt
     print("Loading model from path: {}".format(ckpt_path))
     ckpt = torch.load(ckpt_path)
-    model.load_state_dict(ckpt['model_state_dict'])
-    dset_mode = ckpt.get('dset_mode', dset_mode)
+    dset_mode = ckpt['dset_mode'] if dset_mode is None else dset_mode
+    model_type = ckpt.get('model_type', 'siamese')
 
+    # model
+    model = get_model(model_type,
+                      freeze_encoder=True,
+                      train_mode=False,
+                      principal_encoder=principal_encoder)
+    enc_dim = model.enc_dim
+    model = nn.DataParallel(model)
+    model.load_state_dict(ckpt['model_state_dict'])
+
+    model.to(device)
+
+    print("USING MODEL TYPE {} ON DSET {}".format(model_type, dataset_name))
     print("Using dset mode: {}".format(dset_mode))
 
     # data loader
-    ds = DeepFashionContrastiveLoader(split=dset_split,
-                                      transform=TEST_TRANSFORMS,
-                                      mode=dset_mode,
-                                      one_sample_only=True)
+    ds = get_dataset(dataset_name, dset_mode, one_sample_only=True)
+    ds = ds[0] if dset_split == "train" else ds[1]
     itemids = ds.get_itemids()
     # ds = Subset(ds, range(200))
     dl = DataLoader(ds,
@@ -93,28 +99,37 @@ def generate_embedding_vectors(run_id,
 
 
 def get_nearest_neighbors(run_id,
+                          analysis_tag="",
                           dset_split="validation",
                           subset_n=100,
                           *useless_args,
                           **useless_kwargs):
+
+    assert dset_split in ["validation", "train"]
+
+    analysis_id = run_id if not analysis_tag else "{}_{}".format(
+        run_id, analysis_tag)
     preds_path = os.path.join(
-        cfg.PREDS_DIR, "{}_{}_embedding.json".format(run_id, dset_split))
+        cfg.PREDS_DIR, "{}_{}_embedding.json".format(analysis_id, dset_split))
     print("loading preds from: {}".format(preds_path))
 
     nn_ds_savepath = os.path.join(
         cfg.PREDS_DIR,
-        "{}_{}_nearest_neighbors_structure.pkl".format(run_id, dset_split))
+        "{}_{}_nearest_neighbors_structure.pkl".format(analysis_id,
+                                                       dset_split))
     print(
         "Saving nearest neighbor data structure to: {}".format(nn_ds_savepath))
 
     nn_data_savepath = os.path.join(
         cfg.PREDS_DIR,
-        "{}_{}_{}_nearest_neighbors.pkl".format(run_id, dset_split, subset_n))
+        "{}_{}_{}_nearest_neighbors.pkl".format(analysis_id, dset_split,
+                                                subset_n))
     print("Saving nearest neigbhors data to: {}".format(nn_data_savepath))
 
     nn_savepath = os.path.join(
         cfg.PREDS_DIR,
-        "{}_{}_{}_nearest_neighbors.json".format(run_id, dset_split, subset_n))
+        "{}_{}_{}_nearest_neighbors.json".format(analysis_id, dset_split,
+                                                 subset_n))
     print("Saving nearest neigbhors to: {}".format(nn_savepath))
 
     with open(preds_path) as infile:
@@ -194,7 +209,7 @@ def main(operation, *args, **kwargs):
         generate_embedding_vectors(*args, **kwargs)
         print("GEN NEAREST NEIGHBORS")
         get_nearest_neighbors(*args, **kwargs)
-    else: 
+    else:
         raise Exception("Unknown operation {}".format(operation))
 
 

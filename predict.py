@@ -5,6 +5,7 @@ import pickle
 import fire
 import numpy as np
 import torch
+from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from torch import nn
 from torch.utils.data import DataLoader, Subset
@@ -199,19 +200,126 @@ def _construct_nearest_neighbors(features,
     return distances, indices
 
 
+def run_pca(run_id,
+            analysis_tag="",
+            dset_split="validation",
+            subset_n=100,
+            *useless_args,
+            **useless_kwargs):
+
+    assert dset_split in ["validation", "train"]
+
+    analysis_id = run_id if not analysis_tag else "{}_{}".format(
+        run_id, analysis_tag)
+    preds_path = os.path.join(
+        cfg.PREDS_DIR, "{}_{}_embedding.json".format(analysis_id, dset_split))
+    print("loading preds from: {}".format(preds_path))
+
+    pca_features_savepath = os.path.join(
+        cfg.PREDS_DIR, "{}_{}_pca.json".format(analysis_id, dset_split))
+    print("Saving PCA features to: {}".format(pca_features_savepath))
+
+    pca_examples_savepath = os.path.join(
+        cfg.PREDS_DIR,
+        "{}_{}_pca_component_examples.json".format(analysis_id, dset_split))
+    print("Saving PCA axis examples to: {}".format(pca_examples_savepath))
+
+    if os.path.exists(pca_features_savepath):
+        print("Loading pca data from {}".format(pca_features_savepath))
+        with open(pca_features_savepath) as infile:
+            pca_data = json.load(infile)
+
+        components = np.array(pca_data['components'])
+        reduced_features = np.array(pca_data['reduced_features'])
+        keys = pca_data['sample_keys']
+        explained_variance_ratio = np.array(
+            pca_data['explained_variance_ratio'])
+        singular_values = np.array(pca_data['singular_values'])
+
+    else:
+        print("Computing PCA data")
+        with open(preds_path) as infile:
+            preds = json.load(infile)
+
+        keys = sorted(list(preds.keys()))
+        features = np.zeros((len(keys), len(preds[keys[0]])))
+        print("features shape", features.shape)
+
+        for i, k in enumerate(keys):
+            features[i, :] = preds[k]
+
+        (reduced_features, components, explained_variance_ratio,
+         singular_values) = _run_pca(features)
+
+        print("Saving PCA data...")
+        with open(pca_features_savepath, "w") as outfile:
+            pca_data = {
+                'sample_keys': keys,
+                'reduced_features': reduced_features.tolist(),
+                'components': components.tolist(),
+                'explained_variance_ratio': explained_variance_ratio.tolist(),
+                'singular_values': singular_values.tolist()
+            }
+            json.dump(pca_data, outfile)
+
+    # For each principal component, rank the samples based on that feature
+    print("Computing examples along each principal component")
+    samples_by_component_data = []
+
+    for component_i in tqdm(range(len(components))):
+        samples_by_component = reduced_features[:, component_i]
+        # sort the samples
+        samples_by_component_sorted = sorted(
+            [elt for elt in zip(samples_by_component, keys)])
+        print(len(samples_by_component_sorted))
+        component_i_data = {
+            'samples_sorted': samples_by_component_sorted,
+            'component_i': component_i,
+            'explained_variance_ratio': explained_variance_ratio[component_i],
+            'singular_value': singular_values[component_i]
+        }
+        samples_by_component_data.append(component_i_data)
+
+    print("Saving samples by component...")
+    with open(pca_examples_savepath, "w") as outfile:
+        json.dump(samples_by_component_data, outfile)
+
+
+def _run_pca(features, n_components=100):
+    pca = PCA(n_components=n_components)
+    print("Fitting PCA")
+    # n_samples x n_components
+    reduced_features = pca.fit_transform(features)
+    print("Reduced features shape", reduced_features.shape)
+    # n_components x n_features: directionsf max variance in the data
+    components = pca.components_
+    # array, n components
+    explained_variance_ratio = pca.explained_variance_ratio_
+    # array, n components
+    singular_values = pca.singular_values_
+
+    return (reduced_features, components, explained_variance_ratio,
+            singular_values)
+
+
 def main(operation, *args, **kwargs):
     if operation == 'gen_embedding':
         generate_embedding_vectors(*args, **kwargs)
     elif operation == 'nearest_neighbors':
         get_nearest_neighbors(*args, **kwargs)
-    elif operation == 'both':
+    elif operation == 'pca':
+        run_pca(*args, **kwargs)
+    elif operation == 'all':
         print("GEN EMBEDDING")
         generate_embedding_vectors(*args, **kwargs)
         print("GEN NEAREST NEIGHBORS")
         get_nearest_neighbors(*args, **kwargs)
+        print("PCA")
+        run_pca(*args, **kwargs)
     else:
         raise Exception("Unknown operation {}".format(operation))
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    run_pca(run_id="dual_simplicity", analysis_tag="line_drawing")
+    # fire.Fire(main)

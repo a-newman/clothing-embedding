@@ -10,17 +10,6 @@ from torchvision import transforms as T
 
 import config as cfg
 
-GROUPID_TO_ITEMIDS = \
-    "/home/anelise/lab/clothes_detection/embedding/scripts/groupid_to_itemids_{}.json"
-
-DEEPFASHION_PATH = "/home/anelise/datasets/deepfashion2"
-
-SIMPLICITY_PATH = "/home/anelise/datasets/patterns/simplicity/"
-SIMPLICITY_IMAGES_PATH = os.path.join(SIMPLICITY_PATH, "pattern_images")
-SIMPLICITY_DATA_PATH = os.path.join(SIMPLICITY_PATH, "pattern_clean_data")
-SIMPLICITY_BBOXES_PATH = os.path.join(SIMPLICITY_PATH,
-                                      "line_drawing_detections")
-
 TRAIN_TRANSFORMS = T.Compose([
     # image_rescale_zero_to_1_transform(),
     T.ToPILImage(),
@@ -64,6 +53,11 @@ def get_dataset(dataset_name, dset_mode, *args, **kwargs):
             mode=dset_mode,
             *args,
             **kwargs)
+    elif os.path.exists(dataset_name):
+        train_ds = ImageFolderLoader(root=dataset_name,
+                                     transforms=TRAIN_TRANSFORMS)
+        test_ds = ImageFolderLoader(root=dataset_name,
+                                    transforms=TEST_TRANSFORMS)
     else:
         raise RuntimeError("Unrecognized dataset name {}".format(dataset_name))
 
@@ -108,7 +102,7 @@ class DeepFashionContrastiveLoader(data.Dataset):
         self.itemid_to_groupid = {}
 
         if groupid_to_itemids_fp is None:
-            groupid_to_itemids_fp = GROUPID_TO_ITEMIDS.format(split)
+            groupid_to_itemids_fp = cfg.GROUPID_TO_ITEMIDS.format(split)
 
         with open(groupid_to_itemids_fp) as infile:
             self.groupid_to_itemids = json.load(infile)
@@ -136,7 +130,7 @@ class DeepFashionContrastiveLoader(data.Dataset):
 
     def _load_annotations(self, itemid, split):
         imid, itemid = itemid.split("_")
-        annfp = os.path.join(DEEPFASHION_PATH, split, "annos",
+        annfp = os.path.join(cfg.DEEPFASHION_PATH, split, "annos",
                              "{}.json".format(imid))
         with open(annfp) as infile:
             data = json.load(infile)
@@ -150,7 +144,7 @@ class DeepFashionContrastiveLoader(data.Dataset):
 
     def _load_image(self, itemid, split):
         imid, itemid = itemid.split("_")
-        imfp = os.path.join(DEEPFASHION_PATH, split, "image",
+        imfp = os.path.join(cfg.DEEPFASHION_PATH, split, "image",
                             "{}.jpg".format(imid))
         img = cv2.imread(imfp)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -182,7 +176,7 @@ class DeepFashionContrastiveLoader(data.Dataset):
 
         return image[y1:y2, x1:x2, :]
 
-    def _transform(self, image, annos):
+    def _transform(self, image, annos, torch_transform=True):
         if self.mode == "color_mask_crop":
             masked_image = self._mask(image, annos)
             cropped_image = self._crop(masked_image, annos)
@@ -210,7 +204,7 @@ class DeepFashionContrastiveLoader(data.Dataset):
         else:
             raise NotImplementedError()
 
-        if self.transform is not None:
+        if self.transform is not None and torch_transform:
             im = self.transform(im)
 
         return im
@@ -219,6 +213,13 @@ class DeepFashionContrastiveLoader(data.Dataset):
         x1id = self.itemids[index]
 
         return self.getitem_by_id(x1id)
+
+    def visualize_item(self, x1id):
+        x1_annos = self._load_annotations(x1id, self.split)
+        x1_image = self._load_image(x1id, self.split)
+        x1 = self._transform(x1_image, x1_annos, torch_transform=False)
+
+        return x1
 
     def getitem_by_id(self, x1id):
         x1_annos = self._load_annotations(x1id, self.split)
@@ -267,9 +268,9 @@ class DeepFashionContrastiveLoader(data.Dataset):
 class SimplicityContrastiveLoader(data.Dataset):
     """Data loader for the Simplicity data set."""
     def __init__(self,
-                 image_path=SIMPLICITY_IMAGES_PATH,
-                 data_path=SIMPLICITY_DATA_PATH,
-                 bbox_path=SIMPLICITY_BBOXES_PATH,
+                 image_path=cfg.SIMPLICITY_IMAGES_PATH,
+                 data_path=cfg.SIMPLICITY_DATA_PATH,
+                 bbox_path=cfg.SIMPLICITY_BBOXES_PATH,
                  positive_proportion=0.5,
                  image_transforms=None,
                  line_drawing_tranforms=None,
@@ -344,7 +345,7 @@ class SimplicityContrastiveLoader(data.Dataset):
     def get_itemids(self):
         return self.data_files
 
-    def getitem_by_id(self, data_file):
+    def visualize_item(self, data_file):
         if self.mode == "natural_image":
             with open(os.path.join(self.data_path, data_file)) as infile:
                 data = json.load(infile)
@@ -412,3 +413,48 @@ class SimplicityContrastiveLoader(data.Dataset):
         y = int(choose_same_class)
 
         return img, cropped_line_drawing, y
+
+
+class ImageFolderLoader():
+    def __init__(self, root, transforms=None, verbose=0, raise_on_error=True):
+        self.root = root
+        self.transforms = transforms
+        self.verbose = verbose
+        self.raise_on_error = True
+
+        self.ext = ['.jpg', '.png', '.jpeg']
+
+        self.images = [
+            elt for elt in os.listdir(self.root)
+            if os.path.splitext(elt)[1].lower() in self.ext
+        ]
+
+        if self.verbose:
+            print("Found {} images".format(len(self.images)))
+
+    def __getitem__(self, index):
+        fname = self.images[index]
+        path = os.path.join(self.root, fname)
+
+        if not os.path.exists(path):
+            raise RuntimeError("No file {}".format(path))
+        img = cv2.imread(path)
+
+        if img is None:
+            if self.raise_on_error:
+                raise InvalidDataException(
+                    "Could not open image {}".format(path))
+            img = np.zeros((256, 256, 3)).astype('uint8')
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        if self.transforms is not None:
+            img = self.transforms(img)
+
+        return img
+
+    def __len__(self):
+        return len(self.images)
+
+    def get_fnames(self):
+        return self.images

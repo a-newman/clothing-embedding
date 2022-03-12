@@ -73,7 +73,7 @@ pandocfilters==1.4.2
 parso==0.6.0
 pexpect==4.8.0
 pickleshare==0.7.5
-Pillow==6.1.0
+Pillow==9.0.1
 pipdate==0.2.4
 portalocker==1.5.2
 -e git+https://github.com/alexandonian/pretorched-x@74f92fa0ed1c64fa4bc0c4aaf86f56d315cb0c45#egg=pretorched
